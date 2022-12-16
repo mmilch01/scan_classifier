@@ -68,10 +68,10 @@ class ScanClassificationModel:
         self._scan_types=[]
         self._nomenclature_name=""
         
-    def get_single_strings(self):
-        out=[]
-        for s in self._selected_tags:
-            if s in self._singleton_string_tags: out=
+    #def get_single_strings(self):
+    #   out=[]
+    #   for s in self._selected_tags:
+    #        if s in self._singleton_string_tags: out=
         
     def tagname_to_group_element(name):
         rep=str(pydicom.tag.Tag(pydicom.datadict.tag_for_keyword(name)))
@@ -169,8 +169,59 @@ class UniversalScanClassifier:
         hofids=[ s['hof_id'] for s in scans ] if gen_hofids else []
         return vectorized_descs,vectorizer.transform(hofids).toarray()
     
+    def get_coded_tag_value(self,scan,selected_tag):
+        s,st=scan,selected_tag
+        out=''
+        if st in self._scm._singleton_string_tags:
+            out=s[st]
+        elif st in self._scm._composite_string_tags:
+            out=re.sub('[^0-9a-zA-Z ]+',' ',s[st]).split()
+        #elif st in self._scm._singleton_numeric_tags:
+        #    return str(s[st])
+        else:
+            out=str(s[st])
+        return out
+        
+    def get_coded_xnat_field_value(self,scan,selected_tag):
+        
+        #TODO: unique word prefix mapping for single and array numeric values.
+        #For that, define a) transform (none, log) and b) prefix-maybe, no need for prefix?
+        #then define a) transform and b)discrete sampling step. Prefix is the name of tag.
+        
+        s,st=scan,selected_tag
+        out=""
+        if st in self._scm._singleton_string_tags_xnat:
+            out=s[st]
+        elif st in self._scm._composite_string_tags_xnat:
+            out=re.sub('[^0-9a-zA-Z ]+',' ',s[st]).split()
+        elif st=='frames':
+            try:
+                frames='frames{}'.format(str(int(np.around(np.log(1.0+float(s['frames']))*3.0))))
+            except:
+                frames='frames0'
+            out=frames
+        #elif st in self._scm._singleton_numeric_tags:
+        #    return str(s[st])
+        else:
+            out=str(s[st])
+        return out
+        
+        
     def prepare_desc(self,scan):
         s=scan
+        words=[]
+        for st in self._scm._selected_tags:
+            words.append(self.get_coded_tag_value(s,st))
+        for sf in self._scm._selected_fields_xnat:
+            words.append(self.get_coded_xnat_fields_value(s,sf))
+        return ' '.join([w for w in words if ((not w.isdigit()) and (len(w)>1)) ])            
+'''        
+            if st in self._scm._singleton_string_tags:
+               desc.append(s[st])
+            elif st in self._scm._composite_string_tags:
+                desc=(re.sub('[^0-9a-zA-Z ]+',' ',s['series_description'])).split()
+                
+        
         desc=(re.sub('[^0-9a-zA-Z ]+',' ',s['series_description'])).split()
         #compressed representation of the number of frames.
         try:
@@ -178,8 +229,8 @@ class UniversalScanClassifier:
         except:
             frames='frames0'
         desc.append(frames)
-        return ' '.join([s for s in desc if ((not s.isdigit()) and (len(s)>1)) ])
-        
+'''
+
     def prepare_descs(self,scans):
         #descs are 'sentences' that contain all supported tags and xnat fields.
         #(former series description and log-compressed number of frames.)
@@ -264,8 +315,12 @@ class UniversalScanClassifier:
         self.classifier.save(rt+'.hd5')
         
     def load_model_nn(self,rt):
-        self.vectorizer=pickle.load(open(rt+'.vec','rb'))
-        self.classifier=tf.keras.models.load_model(rt+'.hd5')
+        return self.load_model_nn1(rt+'.vec',rt+'.hd5')
+        
+    def load_model_nn1(self,model_file,vec_file):
+        self.vectorizer=pickle.load(open(vec_file,'rb'))
+        self.classifier=tf.keras.models.load_model(model_file)
+        return self.vectorizer is not None and self.classifier is not None
     
     def save_model(self, file):
         pickle.dump([self.vectorizer,self.classifier],open(file,'wb'))
