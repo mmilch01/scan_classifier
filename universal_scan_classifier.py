@@ -215,22 +215,21 @@ class UniversalScanClassifier:
         for sf in self._scm._selected_fields_xnat:
             words.append(self.get_coded_xnat_fields_value(s,sf))
         return ' '.join([w for w in words if ((not w.isdigit()) and (len(w)>1)) ])            
-'''        
-            if st in self._scm._singleton_string_tags:
-               desc.append(s[st])
-            elif st in self._scm._composite_string_tags:
-                desc=(re.sub('[^0-9a-zA-Z ]+',' ',s['series_description'])).split()
-                
-        
-        desc=(re.sub('[^0-9a-zA-Z ]+',' ',s['series_description'])).split()
-        #compressed representation of the number of frames.
-        try:
-            frames='frames{}'.format(str(int(np.around(np.log(1.0+float(s['frames']))*3.0))))
-        except:
-            frames='frames0'
-        desc.append(frames)
-'''
+        '''        
+                    if st in self._scm._singleton_string_tags:
+                       desc.append(s[st])
+                    elif st in self._scm._composite_string_tags:
+                        desc=(re.sub('[^0-9a-zA-Z ]+',' ',s['series_description'])).split()
 
+
+                desc=(re.sub('[^0-9a-zA-Z ]+',' ',s['series_description'])).split()
+                #compressed representation of the number of frames.
+                try:
+                    frames='frames{}'.format(str(int(np.around(np.log(1.0+float(s['frames']))*3.0))))
+                except:
+                    frames='frames0'
+                desc.append(frames)
+        '''
     def prepare_descs(self,scans):
         #descs are 'sentences' that contain all supported tags and xnat fields.
         #(former series description and log-compressed number of frames.)
