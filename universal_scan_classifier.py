@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
-import getpass, ipywidgets as ipw, os, json, shlex, io, re, tempfile, subprocess
+import getpass, ipywidgets as ipw, os, json, shlex, io, re, tempfile, subprocess,unittest
 import pydicom,numpy as np,csv,warnings,pickle,sys,tensorflow as tf
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
+from sklearn.svm import LinearSVC
 from tensorflow.keras.models import Sequential
 from tensorflow.keras import layers
 from tensorflow.keras import backend as K
 from IPython.display import FileLink
+from matplotlib import pyplot as plt
+from zipfile import ZipFile
+
 
 warnings.filterwarnings('ignore')
 warnings.simplefilter('ignore')
@@ -67,6 +71,7 @@ class ScanClassificationModel:
         self._selected_fields_xnat=[]
         self._scan_types=[]
         self._nomenclature_name=""
+        self.verbosity=1
         
     #def get_single_strings(self):
     #   out=[]
@@ -103,12 +108,23 @@ class ScanClassificationModel:
         return True
     
     def load(self,d:json):
-        self._scan_types=d['scan_types']
+        self._scan_types=sorted(d['scan_types'])
+        
         self._selected_tags=d['selected_dcm_tags']
         self._selected_fields_xnat=d['selected_fields_xnat']
         self._nomenclature_name=d['nomenclature_name']
         self._dense_layer_size=len(self._scan_types)*2
-
+        
+    def load_from_file(self,file):
+        try:
+            with open(file,'r') as f:
+                d=json.load(f)
+            self.load(d)
+        except Exception as e:
+            print(e)
+            print('cannot load classification from file:',file)
+            return False
+        return True
 
 class UniversalScanClassifier:
     def __init__(self,scm:ScanClassificationModel):
@@ -116,8 +132,10 @@ class UniversalScanClassifier:
         self.vectorizer=[]
         self._class_vectorizer=None
         self._scm=scm
+        self.verbosity=1
+        
         #important: must be in aphpabetical order for vectorizer to work correctly.
-        self._classes=scm._scan_types        
+        #self._classes=scm._scan_types        
         #self._scan_list=[]
         
     def load_json(self, json_file):
@@ -162,7 +180,7 @@ class UniversalScanClassifier:
     def prepare_training_vectors_nn(self,scans,gen_hofids=True):
         if self._class_vectorizer is None:
             vectorizer=CountVectorizer(min_df=0)
-            vectorizer.fit(self._classes)
+            vectorizer.fit(self._scm._scan_types)
             self._class_vectorizer=vectorizer
         vectorizer=self._class_vectorizer
         vectorized_descs=self.gen_bow_vectors(scans)
@@ -173,15 +191,20 @@ class UniversalScanClassifier:
         s,st=scan,selected_tag
         out=''
         if st in self._scm._singleton_string_tags:
-            out=s[st]
+            out=[st+'_'+s[st]]
         elif st in self._scm._composite_string_tags:
-            out=re.sub('[^0-9a-zA-Z ]+',' ',s[st]).split()
-        #elif st in self._scm._singleton_numeric_tags:
+            out1=re.sub('[^0-9a-zA-Z ]+',' ',s[st]).split()
+            out=[ st+'_'+ w for w in out1 ]
+        #elif st in self._scm._singleton_numeric_tags:            
         #    return str(s[st])
         else:
-            out=str(s[st])
+            out=[st+'_'+str(s[st])]
         return out
-        
+    
+    
+    def valid_word(self,w):
+        return (not w.isdigit()) and (len(w)>1)
+    
     def get_coded_xnat_field_value(self,scan,selected_tag):
         
         #TODO: unique word prefix mapping for single and array numeric values.
@@ -191,19 +214,20 @@ class UniversalScanClassifier:
         s,st=scan,selected_tag
         out=""
         if st in self._scm._singleton_string_tags_xnat:
-            out=s[st]
+            out=[st+'_'+s[st]] if self.valid_word(s[st]) else []
         elif st in self._scm._composite_string_tags_xnat:
-            out=re.sub('[^0-9a-zA-Z ]+',' ',s[st]).split()
+            out1=re.sub('[^0-9a-zA-Z ]+',' ',s[st]).split()
+            out=[st+'_'+w for w in out1 if self.valid_word(w) ]
         elif st=='frames':
             try:
-                frames='frames{}'.format(str(int(np.around(np.log(1.0+float(s['frames']))*3.0))))
+                frames='frames_{}'.format(str(int(np.around(np.log(1.0+float(s['frames']))*3.0))))
             except:
-                frames='frames0'
-            out=frames
+                frames='frames_0'
+            out=[frames]
         #elif st in self._scm._singleton_numeric_tags:
         #    return str(s[st])
         else:
-            out=str(s[st])
+            out=[st+'_'+str(s[st])]
         return out
         
         
@@ -211,9 +235,13 @@ class UniversalScanClassifier:
         s=scan
         words=[]
         for st in self._scm._selected_tags:
-            words.append(self.get_coded_tag_value(s,st))
-        for sf in self._scm._selected_fields_xnat:
-            words.append(self.get_coded_xnat_fields_value(s,sf))
+            words+=self.get_coded_tag_value(s,st)
+        for sfx in self._scm._selected_fields_xnat:
+            words+=self.get_coded_xnat_field_value(s,sfx)
+            
+        if (self.verbosity>1):
+            print('Description words:',words)
+           
         return ' '.join([w for w in words if ((not w.isdigit()) and (len(w)>1)) ])            
         '''        
                     if st in self._scm._singleton_string_tags:
@@ -230,26 +258,79 @@ class UniversalScanClassifier:
                     frames='frames0'
                 desc.append(frames)
         '''
+    
+    def labeling_valid(self,scans):
+        labels=self._scm._scan_types[:]
+        labels_not_found=self._scm._scan_types[:]
+        valid=True
+        for s in scans:
+            label=s['hof_id']
+            if not label in labels:
+                print('invalid label "{}", for scan {})'.format(label, s))
+                valid=False
+            if label in labels_not_found:
+                labels_not_found.remove(label)
+        if len(labels_not_found)>0:
+            print('The following labels were not found: '+','.join(labels_not_found))
+            valid=False
+        return valid
+        
+    def init_and_run_nn_training(self,scans,test_split=0.11,epochs=10,batch_size=10,random_state=1000):
+        '''
+        Inits and runs NN training from the given set of scans.
+        '''        
+        print('Checking labeling validity...')
+        if not self.labeling_valid(scans):
+            print('Invalid labeling, cannot train. Either fix labels or remove unlabeled records from the training set.')
+            return False
+        
+        print('Generating vocabulary...')
+        self.gen_vocabulary(scans)
+        print('Preparing training vectors...')
+        descs,y=self.prepare_training_vectors_nn(scans)
+        print('Training...')
+        self.train_nn(descs,y,test_split=test_split,epochs=epochs,\
+                      batch_size=batch_size,random_state=random_state)
+        print('Done.')
+        return True
+        
+    def init_and_run_svm_training(self,scans,test_split=0.11,random_state=1000):
+        print('Checking labeling validity...')
+        if not self.labeling_valid(scans):
+            print('Invalid labeling, cannot train. Either fix labels or remove unlabeled records from the training set.')
+            return False
+
+        print('Generating vocabulary...')
+        self.gen_vocabulary(scans)
+        print('Preparing training vectors...')
+        descs,y=self.prepare_training_vectors(scans)
+        print('Training...')
+        self.train_classifier(descs,y,test_split=test_split,random_state=random_state)
+        print('Done.');
+        
     def prepare_descs(self,scans):
         #descs are 'sentences' that contain all supported tags and xnat fields.
         #(former series description and log-compressed number of frames.)
-        return [prepare_desc(s) for s in scans ]
+        return [self.prepare_desc(s) for s in scans ]
         
     def gen_bow_vectors(self,scans):
         if not self.vectorizer: return []
         descs=self.prepare_descs(scans)
         return self.vectorizer.transform(descs).toarray()
     
-    def train_nn(self,X,y,test_split,epochs=10,batch_size=10):
-        X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=test_split,random_state=1000)
+    def train_nn(self,X,y,test_split=0.11,epochs=10,batch_size=10, random_state=1000):
+        print('test dataset split ratio: {}, epochs: {}, batch size: {}, random state: {}, \
+            dense nodes: {}'.format(test_split,epochs,batch_size,random_state,self._scm._dense_layer_size))
+              
+        X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=test_split,random_state=random_state)
         input_dim=X_train.shape[1]
         print('input_dim:',input_dim)
         model = Sequential()
         model.add(layers.Dense(self._scm._dense_layer_size,input_dim=input_dim,activation='relu'))
         #model.add(layers.Dense(36,input_dim=input_dim,activation='relu'))        
         #model.add(layers.Dense(18,activation='relu'))
-        model.add(layers.Dense(len(self._classes),activation='sigmoid'))
-        print('output_dim:',len(self._classes))
+        model.add(layers.Dense(len(self._scm._scan_types),activation='sigmoid'))
+        print('output_dim:',len(self._scm._scan_types))
         model.compile(loss='binary_crossentropy',optimizer='adam',metrics=['accuracy','categorical_accuracy'])
         model.summary()
         self.classifier=model
@@ -279,11 +360,15 @@ class UniversalScanClassifier:
     def infer_nn(self,scans):
         vecs,ids=self.prepare_training_vectors_nn(scans,False)
         y_fit=self.classifier.predict(vecs)        
-        hofids=[ self._classes[np.argmax(y_fit[i])] for i in range(len(y_fit)) ]
-        return hofids        
+        hofids=[ self._scm._scan_types[np.argmax(y_fit[i])] for i in range(len(y_fit)) ]
+        return hofids
+    
+    def infer_svm(self,scans):
+        vectorized_descs=self.gen_bow_vectors(scans)
+        return self._predict_classifier(vectorized_descs)
         
-    def train_classifier(self,X,y,test_split):
-        descs_train,descs_test,y_train,y_test=train_test_split(X,y,test_size=test_split,random_state=1000)
+    def train_classifier(self,X,y,test_split,random_state=1000):
+        descs_train,descs_test,y_train,y_test=train_test_split(X,y,test_size=test_split,random_state=random_state)
         #classifier=LogisticRegression()
         classifier=LinearSVC()
         #classifier=SVC()
@@ -291,8 +376,7 @@ class UniversalScanClassifier:
         scoreTest=classifier.score(descs_test,y_test)
         scoreTrain=classifier.score(descs_train,y_train)
         print('Test accuracy:', scoreTest, " train accuracy:",scoreTrain)        
-        self.classifier=classifier
-        
+        self.classifier=classifier        
         return classifier
         
     def _predict_classifier(self,X):
@@ -308,21 +392,151 @@ class UniversalScanClassifier:
     
     def is_valid_model(self):
         return (self.vectorizer and self.classifier)    
+    
+    def save_model(self,file):
+        pickle.dump([self.vectorizer,self.classifier],open(file,'wb'))
         
-    def save_model_nn(self,rt):
-        pickle.dump(self.vectorizer,open(rt+'.vec','wb'))
-        self.classifier.save(rt+'.hd5')
+    def load_model(self,file):
+        self.vectorizer=pickle.load(open(rt+'.vec','rb'))
+        self.classifier=tf.keras.models.load_model(rt+'.hd5')
         
-    def load_model_nn(self,rt):
-        return self.load_model_nn1(rt+'.vec',rt+'.hd5')
+    def save_model_nn(self,file):
+        rt=os.path.splitext(file)[0]
+        zf,vec,hd5=file,rt+'.vec',rt+'.hd5'
+        pickle.dump(self.vectorizer,open(vec,'wb'))
+        self.classifier.save(hd5)
+        with ZipFile(zf,'w') as zipfile:
+            zipfile.write(hd5,arcname=os.path.basename(hd5))
+            zipfile.write(vec,arcname=os.path.basename(vec))            
+        os.remove(vec)
+        os.remove(hd5)
         
-    def load_model_nn1(self,model_file,vec_file):
+    def load_model_nn(self,zipfile):
+        
+        zipfile_dir=os.path.dirname(zipfile)
+        with ZipFile(zipfile,'r') as zf:
+            zf.extractall(zipfile_dir)
+            
+        rt=os.path.splitext(zipfile)[0]
+        vec_file,model_file=rt+'.vec',rt+'.hd5'
+        
         self.vectorizer=pickle.load(open(vec_file,'rb'))
         self.classifier=tf.keras.models.load_model(model_file)
+        os.remove(vec_file)
+        os.remove(model_file)
         return self.vectorizer is not None and self.classifier is not None
     
     def save_model(self, file):
         pickle.dump([self.vectorizer,self.classifier],open(file,'wb'))
                     
     def load_model(self, file):
-        self.vectorizer,self.classifier=pickle.load(open(file,'rb'))    
+        self.vectorizer,self.classifier=pickle.load(open(file,'rb'))
+
+class UniversalScanClassifierTest:
+#    def setUp(self):
+#        pass
+    def __init__(self):
+        self.scm=ScanClassificationModel()
+        self.usc=UniversalScanClassifier(self.scm)
+        pass
+    
+    def test_load_nomenclature1(self):
+        print('loading from file:',self.scm.load_from_file('./test/neuro_onc.json')==True)
+        
+    def test_load_nomenclature2(self):
+        print('loading from file:',self.scm.load_from_file('./test/mri_types.json')==True)
+        
+            
+    def test_load_training_set1(self):
+        try:
+            self.scans=self.usc.read_scans_csv('./test/all_scans_hofid.csv')
+            if len(self.scans)>0: 
+                print ('loaded scans from','./test/all_scans_hofid.csv')
+        except Exception as e:
+            print(e)
+            print('loading scans from file failed')
+            
+    def test_load_training_set2(self):
+        self.scans=self.usc.read_scans_csv('./test/all_scans_function.csv')
+            
+    def test_train_model1_nn(self,test_split=0.11,epochs=10,batch_size=10,random_state=1000):
+        #try:      
+        self.test_load_nomenclature1()
+        self.test_load_training_set1()
+        self.usc.init_and_run_nn_training(self.scans,test_split=test_split,\
+                                          epochs=epochs,batch_size=batch_size,random_state=random_state)
+        
+        self.usc.save_model_nn('./test/neuro-onc-test.zip')
+        #except Exception as e:
+        #    print('Exception:',e)
+        
+    def test_train_model1_svm(self,test_split=0.11,random_state=1000):
+        self.test_load_nomenclature1()
+        self.test_load_training_set1()
+        self.usc.init_and_run_svm_training(self.scans,test_split=test_split,random_state=random_state)        
+        self.usc.save_model('./test/neuro-onc-test_svm.pkl')
+        
+    def test_train_model2_svm(self,test_split=0.11,random_state=1000):
+        self.test_load_nomenclature2()
+        self.test_load_training_set2()
+        self.usc.init_and_run_svm_training(self.scans,test_split=test_split,random_state=random_state)        
+        self.usc.save_model('./test/mri_types-test_svm.pkl')
+        
+    def test_train_model2_nn(self,test_split=0.11,epochs=10,batch_size=10,random_state=1000):
+        self.test_load_nomenclature2()
+        self.test_load_training_set2()
+        self.scans=self.usc.read_scans_csv('./test/all_scans_function.csv')
+        print ('loaded scans from','./test/all_scans_function.csv')
+        self.usc.init_and_run_nn_training(self.scans,test_split=test_split,\
+                                          epochs=epochs,batch_size=batch_size,random_state=random_state)
+        self.usc.save_model_nn('./test/mri_types-test.zip')
+        
+    def prediction_accuracy(self,labeled_scans,classified_types):
+        scans=labeled_scans
+        n=0
+        for i in range(len(scans)):
+            if classified_types[i]!=scans[i]['hof_id']:
+                print('position: {}, predicted: {}, actual: {}'\
+                      .format(i,classified_types[i],scans[i]['hof_id']))
+                n+=1
+        print('Classification accuracy:',1.-n/len(scans))
+        print("Done.")
+        
+    
+    def test_validate_model1_svm(self):
+        self.test_load_nomenclature1()
+        self.usc.load_model('./test/neuro-onc-test_svm.pkl')
+        scans=self.usc.read_scans_csv('./test/all_scans_hofid.csv')
+        classified_types=self.usc.infer_svm(scans)
+        self.prediction_accuracy(scans,classified_types)
+        
+    def test_validate_model2_svm(self):
+        self.test_load_nomenclature2()
+        self.usc.load_model('./test/mri_types-test_svm.pkl')
+        scans=self.usc.read_scans_csv('./test/all_scans_function.csv')
+        classified_types=self.usc.infer_svm(scans)
+        self.prediction_accuracy(scans,classified_types)        
+                            
+    def test_validate_model1_nn(self):
+        self.test_load_nomenclature1()
+        self.usc.load_model_nn('./test/neuro-onc-test.zip')
+        scans=self.usc.read_scans_csv('./test/all_scans_hofid.csv')
+        classified_types=self.usc.infer_nn(scans)
+        self.prediction_accuracy(scans,classified_types)
+            
+    def test_validate_model2_nn(self):
+        self.test_load_nomenclature2()
+        self.usc.load_model_nn('./test/mri_types-test.zip')
+        scans=self.usc.read_scans_csv('./test/all_scans_function.csv')
+        classified_types=self.usc.infer_nn(scans)
+        self.prediction_accuracy(scans,classified_types)
+
+    def test_infer_model2_svm(self):
+        self.usc.load_model('./test/mri_types-test_svm.pkl')
+        scans=self.usc.read_scans_csv('./test/all_scans.csv')
+        classified_scans=self.usc.predict_classifier(scans)
+        self.usc.write_scans_csv(classified_scans,'./test/all_scans-mri_types_predicted_svm.csv')
+        
+            
+       
+    

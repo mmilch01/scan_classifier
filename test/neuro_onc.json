@@ -1,0 +1,1 @@
+{"scan_types": ["CBF", "CBV", "DSC", "DWI", "FA", "MD", "MPRAGE", "MTT", "OT", "PBP", "SWI", "T1hi", "T1lo", "T2FLAIR", "T2hi", "T2lo", "TRACEW", "TTP"], "selected_dcm_tags": [], "selected_fields_xnat": ["frames", "series_description"], "nomenclature_name": "NeuroOncologyMRI"}

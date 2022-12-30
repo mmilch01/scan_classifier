@@ -1,0 +1,1 @@
+{"scan_types": ["anatomical", "bold_raw_rest", "bold_raw_task", "bold_rsn", "functional_raw", "functional_secondary", "other", "radread"], "selected_dcm_tags": [], "selected_fields_xnat": ["frames", "series_description"], "nomenclature_name": "mri_types"}
