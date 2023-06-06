@@ -30,6 +30,7 @@ Created on Mon Dec 12 15:45:06 2022
 
 @author: mmilchenko
 """
+
 class ScanClassificationModel:
     def __init__(self):
         #define available tags
@@ -37,14 +38,16 @@ class ScanClassificationModel:
         'BodyPartExamined','ScanningSequence','SequenceVariant','MRAcquisitionType',\
         'SequenceName','ScanOptions','SliceThickness','RepetitionTime','EchoTime','InversionTime',\
         'MagneticFieldStrength','NumberOfPhaseEncodingSteps','EchoTrainLength','PercentSampling',\
-        'PercentPhaseFieldOfView','PixelBandwidth','AcquisitionMatrix',\
+        'PercentPhaseFieldOfView','PixelBandwidth','AcquisitionMatrix','ImageType',\
         'FlipAngle','VariableFlipAngleFlag','PatientPosition','PhotometricInterpretation','Rows',\
-                                          'Columns','PixelSpacing']
+                                          'Columns','PixelSpacing','ContrastBolusVolume','ContrastBolusTotalDose',\
+                                         'ContrastBolusIngredient','ContrastBolusIngredientConcentration'\                                          
+                                         ]
         #single word
         self._singleton_string_tags=['Modality','Manufacturer','ManufacturerModelName','BodyPartExamined',\
                                     'ScanningSequence','SequenceVariant','MRAcquisitionType','SequenceName',\
-                                    'MagneticFieldStrength']
-        self._singleton_string_tags_xnat=['type','quality','condition','scanner','modality']        
+                                    'MagneticFieldStrength','ImageType']
+        self._singleton_string_tags_xnat=['type','quality','condition','scanner','modality','ID']
         
         
         #multi-word possible
@@ -53,7 +56,8 @@ class ScanClassificationModel:
         
         #single number
         self._singleton_numeric_tags=['SliceThickness','FlipAngle','RepetitionTime','EchoTime',\
-                                      'InversionTime','Rows','Columns']        
+                                      'InversionTime','Rows','Columns','ContrastBolusVolume','ContrastBolusTotalDose',\
+                                         'ContrastBolusIngredient','ContrastBolusIngredientConcentration']
         self._singleton_numeric_tags_xnat=['frames']
         
         #array of numbers
@@ -71,6 +75,7 @@ class ScanClassificationModel:
         self._selected_fields_xnat=[]
         self._scan_types=[]
         self._nomenclature_name=""
+        self._classifier_type="perceptron_nn"
         self.verbosity=1
         
     #def get_single_strings(self):
@@ -96,10 +101,13 @@ class ScanClassificationModel:
     def check_validity(self):
         '''
         validate input
-        '''        
+        '''
         if len(self._scan_types)<2:
             print('Enter at least two scan types.')
             return False
+        if len(self._scan_types)<3 and self._classifier_type=="perceptron_nn":
+            print('The perceptron_nn does not support two classes. Please use linear_svm.')
+            return False                  
         if len(self._selected_tags)+len(self._selected_fields_xnat)<1:
             print('Select at least one DICOM tag or XNAT field.')
             return False
@@ -112,8 +120,12 @@ class ScanClassificationModel:
         
         self._selected_tags=d['selected_dcm_tags']
         self._selected_fields_xnat=d['selected_fields_xnat']
-        self._nomenclature_name=d['nomenclature_name']
-        self._dense_layer_size=len(self._scan_types)*2
+        self._nomenclature_name=d['nomenclature_name']        
+        self._dense_layer_size=max(8,len(self._scan_types)*2)
+        try:
+            self._classifier_type=d['classifier_type']
+        except Exception as e:
+            self._classifier_type='perceptron_nn'
         
     def load_from_file(self,file):
         try:
@@ -125,7 +137,49 @@ class ScanClassificationModel:
             print('cannot load classification from file:',file)
             return False
         return True
+    
+class ScanProcessor:
+    def __init__(self,scm:ScanClassificationModel):
+        self._scm=scm        
+        
+        
+    def filter_unique_dicts(self,dict_list,keys):
+        '''
+        Функция filter_unique_dicts принимает на вход список dict_list словарей и список keys,
+        содержащий поля, по которым нужно произвести фильтрацию. Для каждого словаря в списке 
+        словарей функция вычисляет комбинацию значений этих полей, представленную в виде кортежа.
+        Эта комбинация затем сравнивается со всеми уже встреченными ранее комбинациями. Если
+        текущая комбинация еще не встречалась, то словарь добавляется в список уникальных словарей
+        '''
+        unique_dicts = {}
+        for dictionary in dict_list:
+            key_values = tuple(dictionary[key] for key in keys)
+            if key_values not in unique_dicts:
+                unique_dicts[key_values]={'__usc_occurrences': 1, **dictionary}
+            else:
+                unique_dicts[key_values]['__usc_occurrences'] =int(unique_dicts[key_values]['__usc_occurrences'])+1
+        return list(unique_dicts.values())        
+        
+    def compress_scans(self,scans):
+        '''
+        Remove duplicate scans with fields matching the 
+        member ScanClassificationModel
+        '''
+        scm=self._scm
+        return self.filter_unique_dicts(scans,scm._selected_fields_xnat + scm._selected_tags)
 
+    def expand_dicts(self,dict_list):
+        return [d for d in dict_list for i in range(int(d['__usc_occurrences']))]
+    
+    def uncompress_scans(self,scans):
+        '''
+        Restore duplicate scans removed by compress_scans
+        Note that fields not in ScanClassificationModel are 
+        not restored.
+        '''
+        if '__usc_occurrences' in scans[0]: return self.expand_dicts(scans)
+        else: return scans
+        
 class UniversalScanClassifier:
     def __init__(self,scm:ScanClassificationModel):
         self.classifier=[]
@@ -162,8 +216,8 @@ class UniversalScanClassifier:
     '''
     Create vocabulary from the bag of words. These will act as features.
     '''
-    def gen_vocabulary(self,scans):        
-        descs=self.prepare_descs(scans)        
+    def gen_vocabulary(self,scans):
+        descs=self.prepare_descs(scans)
         vectorizer=CountVectorizer(min_df=0)
         vectorizer.fit(descs)
         self.vectorizer=vectorizer
@@ -275,6 +329,14 @@ class UniversalScanClassifier:
             valid=False
         return valid
         
+    def init_and_run_training(self,scans,test_split=0.11,epochs=10,batch_size=10,random_state=1000):
+        if self._scm._classifier_type=="perceptron_nn":
+            return self.init_and_run_nn_training(scans,test_split=test_split,\
+                                                 epochs=eporchs,batch_size=batch_size,\
+                                                 random_state=random_state)
+        elif self._scm._classifier_type=="linear_svm":
+            return self.init_and_run_svm_training(scans,test_split=test_split,random_state=random_state)
+    
     def init_and_run_nn_training(self,scans,test_split=0.11,epochs=10,batch_size=10,random_state=1000):
         '''
         Inits and runs NN training from the given set of scans.
@@ -356,7 +418,14 @@ class UniversalScanClassifier:
         plt.plot(x, val_loss, 'r', label='Validation loss')
         plt.title('Training and validation loss')
         plt.legend()
-        
+    
+    def infer(self,scans):
+        if self._scm._classifier_type=="perceptron_nn":
+            return self.infer_nn(scans)        
+        elif self._scm._classifier_type=="linear_svm":
+            return self.infer_svm(scans)
+        else: return None
+    
     def infer_nn(self,scans):
         vecs,ids=self.prepare_training_vectors_nn(scans,False)
         y_fit=self.classifier.predict(vecs)        
@@ -391,18 +460,11 @@ class UniversalScanClassifier:
         return scans
     
     def is_valid_model(self):
-        return (self.vectorizer and self.classifier)    
-    
-    def save_model(self,file):
-        pickle.dump([self.vectorizer,self.classifier],open(file,'wb'))
-        
-    def load_model(self,file):
-        self.vectorizer=pickle.load(open(rt+'.vec','rb'))
-        self.classifier=tf.keras.models.load_model(rt+'.hd5')
+        return (self.vectorizer and self.classifier)        
         
     def save_model_nn(self,file):
         rt=os.path.splitext(file)[0]
-        zf,vec,hd5=file,rt+'.vec',rt+'.hd5'
+        zf,vec,hd5=rt+'.zip',rt+'.vec',rt+'.hd5'
         pickle.dump(self.vectorizer,open(vec,'wb'))
         self.classifier.save(hd5)
         with ZipFile(zf,'w') as zipfile:
@@ -427,10 +489,19 @@ class UniversalScanClassifier:
         return self.vectorizer is not None and self.classifier is not None
     
     def save_model(self, file):
-        pickle.dump([self.vectorizer,self.classifier],open(file,'wb'))
-                    
+        if self._scm._classifier_type=="perceptron_nn":
+            return self.save_model_nn(file)
+        elif self._scm._classifier_type=="linear_svm":
+            pickle.dump([self.vectorizer,self.classifier],open(file,'wb'))
+            
     def load_model(self, file):
-        self.vectorizer,self.classifier=pickle.load(open(file,'rb'))
+        if self._scm._classifier_type=="perceptron_nn":
+            return self.load_model_nn(file)
+        elif self._scm._classifier_type=="linear_svm":
+            self.vectorizer,self.classifier=pickle.load(open(file,'rb'))
+            return self.vectorizer is not None and self.classifier is not None
+        else:
+            return False
 
 class UniversalScanClassifierTest:
 #    def setUp(self):

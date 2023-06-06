@@ -28,7 +28,7 @@ class HOF_Classifier:
     def load_json(self, json_file):
         with open(json_file, 'r') as fp:
             out_dict=json.loads(fp.read())
-        return out_dict    
+        return out_dict
     def save_json(self, var, file):
         with open(file,'w') as fp:
             json.dump(var, fp) 
