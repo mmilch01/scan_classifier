@@ -1,29 +1,26 @@
 # -*- coding: utf-8 -*-
-import getpass, ipywidgets as ipw, os, json, shlex, io, re, tempfile, subprocess,unittest
-import pydicom,numpy as np,csv,warnings,pickle,sys,tensorflow as tf
+import getpass, ipywidgets as ipw, os, json, shlex, io, re, tempfile, subprocess,unittest, argparse
+import pydicom,numpy as np,csv,warnings,pickle,sys
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
+
+import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras import layers
 from tensorflow.keras import backend as K
-from IPython.display import FileLink
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+
+from pathlib import Path
 from matplotlib import pyplot as plt
 from zipfile import ZipFile
-
-
-warnings.filterwarnings('ignore')
-warnings.simplefilter('ignore')
-tf.logging.set_verbosity(tf.logging.ERROR)
 
 #%load_ext autoreload
 #%autoreload 2
 
-module_path = os.path.abspath(os.path.join('..'))
-if module_path not in sys.path:
-    sys.path.append(module_path)
-from juxnat_lib.xnat_utils import *
+from juxnat_lib import xnat_utils
+
 
 """
 Created on Mon Dec 12 15:45:06 2022
@@ -41,12 +38,11 @@ class ScanClassificationModel:
         'PercentPhaseFieldOfView','PixelBandwidth','AcquisitionMatrix','ImageType',\
         'FlipAngle','VariableFlipAngleFlag','PatientPosition','PhotometricInterpretation','Rows',\
                                           'Columns','PixelSpacing','ContrastBolusVolume','ContrastBolusTotalDose',\
-                                         'ContrastBolusIngredient','ContrastBolusIngredientConcentration'\                                          
-                                         ]
+                                         'ContrastBolusIngredient','ContrastBolusIngredientConcentration']
         #single word
         self._singleton_string_tags=['Modality','Manufacturer','ManufacturerModelName','BodyPartExamined',\
                                     'ScanningSequence','SequenceVariant','MRAcquisitionType','SequenceName',\
-                                    'MagneticFieldStrength','ImageType']
+                                    'MagneticFieldStrength','ImageType','Radiopharmaceutical']
         self._singleton_string_tags_xnat=['type','quality','condition','scanner','modality','ID']
         
         
@@ -59,13 +55,14 @@ class ScanClassificationModel:
                                       'InversionTime','Rows','Columns','ContrastBolusVolume','ContrastBolusTotalDose',\
                                          'ContrastBolusIngredient','ContrastBolusIngredientConcentration']
         self._singleton_numeric_tags_xnat=['frames']
+        self._sequence_tags=['RadiopharmaceuticalInformationSequence']
         
         #array of numbers
         self._array_numeric_tags=['AcquisitionMatrix','PixelSpacing']
         
         #all supported tags
         self._supported_tags=sorted(self._singleton_string_tags+self._composite_string_tags+\
-            self._singleton_numeric_tags+self._array_numeric_tags)
+            self._singleton_numeric_tags+self._array_numeric_tags+self._sequence_tags)
         
         self._supported_tags_xnat=sorted(self._singleton_string_tags_xnat+\
                                          self._composite_string_tags_xnat+ \
@@ -218,7 +215,7 @@ class UniversalScanClassifier:
     '''
     def gen_vocabulary(self,scans):
         descs=self.prepare_descs(scans)
-        vectorizer=CountVectorizer(min_df=0)
+        vectorizer=CountVectorizer(min_df=0.0)
         vectorizer.fit(descs)
         self.vectorizer=vectorizer
         print('the length of vocabulary is ',len(vectorizer.vocabulary_))
@@ -233,7 +230,7 @@ class UniversalScanClassifier:
     #for a NN output, categorical labels are stored as BOW over vocabulary of class labels.
     def prepare_training_vectors_nn(self,scans,gen_hofids=True):
         if self._class_vectorizer is None:
-            vectorizer=CountVectorizer(min_df=0)
+            vectorizer=CountVectorizer(min_df=0.0)
             vectorizer.fit(self._scm._scan_types)
             self._class_vectorizer=vectorizer
         vectorizer=self._class_vectorizer
@@ -247,10 +244,29 @@ class UniversalScanClassifier:
         if st in self._scm._singleton_string_tags:
             out=[st+'_'+s[st]]
         elif st in self._scm._composite_string_tags:
-            out1=re.sub('[^0-9a-zA-Z ]+',' ',s[st]).split()
-            out=[ st+'_'+ w for w in out1 ]
+            try:
+                out1=re.sub('[^0-9a-zA-Z ]+',' ',s[st]).split()
+                out=[ st+'_'+ w for w in out1 ]
+            except Exception as e:                
+                #print('Exception:',e)
+                #print('tag:',st)
+                #print('scan:',scan)
+                out=[st+'_NA']
+                
         #elif st in self._scm._singleton_numeric_tags:            
         #    return str(s[st])
+        elif st=='SliceThickness':     
+            sout='NA'
+            try:
+                if float(s[st])<=0.1: sout='NA'
+                elif float(s[st])<1.5: sout='high'
+                elif float(s[st])<2.5: sout='medium'
+                else: sout='low'                
+            except Exception as e:
+                pass
+            out=[st+'_'+sout]
+                #print('Exception:',e)
+                #print('Value:',s[st])
         else:
             out=[st+'_'+str(s[st])]
         return out
@@ -398,11 +414,12 @@ class UniversalScanClassifier:
         self.classifier=model
         #self.classifier.fit(X_train,y_train,epochs=10,verbose=True,validation_data=(X_test,y_test),batch_size=10)
         hist=self.classifier.fit(X_train,y_train,epochs=epochs,verbose=True,validation_data=(X_test,y_test),batch_size=batch_size)
+        #return hist
         self.plot_nn_train_history(hist)
         
     def plot_nn_train_history(self,history):
-        acc = history.history['acc']
-        val_acc = history.history['val_acc']
+        acc = history.history['accuracy']
+        val_acc = history.history['val_accuracy']
         loss = history.history['loss']
         val_loss = history.history['val_loss']
         x = range(1, len(acc) + 1)
@@ -431,6 +448,49 @@ class UniversalScanClassifier:
         y_fit=self.classifier.predict(vecs)        
         hofids=[ self._scm._scan_types[np.argmax(y_fit[i])] for i in range(len(y_fit)) ]
         return hofids
+
+    def infer_nn_ext(self,scans):
+        vecs,ids=self.prepare_training_vectors_nn(scans,False)
+        pred=self.classifier.predict(vecs)
+        print('pred:',pred)
+        pred_ord=np.argsort(-pred,axis=1)
+        print('pred_ord:',pred_ord)
+        pred_inv0=[ self._scm._scan_types[pred_ord[i,0]] for i in range(len(pred)) ]
+        pred_inv1=[ self._scm._scan_types[pred_ord[i,1]] for i in range(len(pred)) ]
+
+        max_len=min(len(pred),10)
+        print('pred_inv0, first 10:',pred_inv0[:max_len])
+        print('pred_inv1, first 10:',pred_inv1[:max_len])
+        
+        pred_class1=[]
+        pred_prob1=[]
+        #predicted second most likely class
+        pred_prob2=[]
+        pred_class2=[]
+        pred_entropy=[]
+        pred_gini_impurity=[]
+        pred_margin_confidence=[]
+        series_descriptions=[]
+        
+        for i in range (0,len(pred_inv0)):
+            pred_cur=pred[i]
+            pred_ord_cur=pred_ord[i]
+            pred_class1+=[ pred_inv0[i] ]
+            pred_prob1+=[ pred_cur[pred_ord_cur[0]] ]
+            pred_class2+=[ pred_inv1[i] ]
+            pred_prob2+=[ pred_cur[pred_ord_cur[1]] ]
+
+            pred_gini_impurity+=[1-np.sum(np.array([pred_cur[i]*pred_cur[i] for i in range (0,len(pred_cur))]))]            
+            pred_margin_confidence+=[pred_cur[pred_ord_cur[0]]-pred_cur[pred_ord_cur[1]]]
+
+            try:
+                series_descriptions+=[scans[i]['SeriesDescription'].replace(' ','_')+' ']
+            except Exception as e:
+                series_descriptions+=['NA']
+                print('no series description for file',i)
+		
+        print('First 10 predicted labels:',pred_class1[:max_len])
+        return pred_class1,pred_prob1,pred_class2,pred_prob2,pred_gini_impurity,pred_margin_confidence,series_descriptions
     
     def infer_svm(self,scans):
         vectorized_descs=self.gen_bow_vectors(scans)
@@ -466,7 +526,7 @@ class UniversalScanClassifier:
         rt=os.path.splitext(file)[0]
         zf,vec,hd5=rt+'.zip',rt+'.vec',rt+'.hd5'
         pickle.dump(self.vectorizer,open(vec,'wb'))
-        self.classifier.save(hd5)
+        self.classifier.save(hd5,save_format='h5')
         with ZipFile(zf,'w') as zipfile:
             zipfile.write(hd5,arcname=os.path.basename(hd5))
             zipfile.write(vec,arcname=os.path.basename(vec))            
@@ -475,11 +535,13 @@ class UniversalScanClassifier:
         
     def load_model_nn(self,zipfile):
         
-        zipfile_dir=os.path.dirname(zipfile)
-        with ZipFile(zipfile,'r') as zf:
+        #zipfile_dir=os.path.dirname(zipfile)
+        zipfile_dir=tempfile.gettempdir()
+       	with ZipFile(zipfile,'r') as zf:
             zf.extractall(zipfile_dir)
             
-        rt=os.path.splitext(zipfile)[0]
+        rt=zipfile_dir+'/'+Path(zipfile).stem
+	#rt=os.path.splitext(zipfile)[0]
         vec_file,model_file=rt+'.vec',rt+'.hd5'
         
         self.vectorizer=pickle.load(open(vec_file,'rb'))
@@ -502,6 +564,41 @@ class UniversalScanClassifier:
             return self.vectorizer is not None and self.classifier is not None
         else:
             return False
+
+    def scans_from_files(self,file_list,tags=None):
+        if tags is None: tags=self._scm._supported_tags
+        #print('tags:',tags)
+        scans=[]
+        for file in file_list:
+            d=dict()
+            ds=pydicom.filereader.dcmread(file,stop_before_pixels=True,specific_tags=tags)
+            #ds=pydicom.filereader.dcmread(file,stop_before_pixels=True)
+            #print(ds)
+            for tag in tags:
+                try:
+                    if tag=='Radiopharmaceutical':
+                        d[tag]=ds['RadiopharmaceuticalInformationSequence'][0]['Radiopharmaceutical'].value
+                    else:
+                        d[tag]=ds[tag].value
+                except Exception as e:
+                    pass
+            scans+=[d]
+        return scans
+        
+    def classify_dicom_scans(self, out_file):
+        '''
+            tokenizer_file is not used but is defined for upward compatibility.
+        '''
+        scans=self.scans_from_files(dicom_files)
+        labels1,probs1,labels2,probs2,pred_gini_impurity,pred_margin_confidence,series_descriptions=self.infer_nn_ext(scans)          
+        d={'files':dicom_files,'labels1':labels1,'probs1':probs1,'labels2':labels2,'probs2':probs2,'series_descriptions':series_descriptions,\
+           'pred_gini_impurity':pred_gini_impurity,'pred_margin_confidence':pred_margin_confidence}
+        with open(out_file,mode='w',newline='') as f:
+            w=csv.DictWriter(f,fieldnames=d.keys())
+            w.writeheader()
+            for row in zip(*d.values()): w.writerow(dict(zip(d.keys(),row)))
+
+
 
 class UniversalScanClassifierTest:
 #    def setUp(self):
@@ -529,7 +626,11 @@ class UniversalScanClassifierTest:
             
     def test_load_training_set2(self):
         self.scans=self.usc.read_scans_csv('./test/all_scans_function.csv')
-            
+
+    def test_load_training_set3(self):
+        self.scans=self.usc.read_scans_csv('./test/all_scans_voxelres_hofid.csv')
+
+    
     def test_train_model1_nn(self,test_split=0.11,epochs=10,batch_size=10,random_state=1000):
         #try:      
         self.test_load_nomenclature1()
@@ -561,7 +662,28 @@ class UniversalScanClassifierTest:
         self.usc.init_and_run_nn_training(self.scans,test_split=test_split,\
                                           epochs=epochs,batch_size=batch_size,random_state=random_state)
         self.usc.save_model_nn('./test/mri_types-test.zip')
-        
+
+    def test_train_model3_nn(self,test_split=0.11,epochs=10,batch_size=10,random_state=1000):
+        #self.test_load_nomenclature3()
+        #self.test_load_training_set3()
+        self.scm.load_from_file('./test/neuro_onc-dcm.json')
+        self.scans=self.usc.read_scans_csv('./test/all_scans_voxelres_hofid.csv')
+        print ('loaded scans from','./test/all_scans_voxelres_hofid.csv')
+        self.usc.init_and_run_nn_training(self.scans,test_split=test_split,\
+                                          epochs=epochs,batch_size=batch_size,random_state=random_state)        
+        self.usc.save_model_nn('./test/neuro-onc-test3.zip')
+
+    def test_train_model4_nn(self,test_split=0.11,epochs=10,batch_size=10,random_state=1000):
+        #self.test_load_nomenclature3()
+        #self.test_load_training_set3()
+        self.scm.load_from_file('./test/neuro_onc-dcm.json')
+        self.scans=self.usc.read_scans_csv('./test/manual_label_based_on_classification_output_model_fc_39374-600.03.20.2024_2024Apr06_113650.csv')
+        print ('loaded scans from','./test/manual_label_based_on_classification_output_model_fc_39374-600.03.20.2024_2024Apr06_113650.csv')
+        self.usc.init_and_run_nn_training(self.scans,test_split=test_split,\
+                                          epochs=epochs,batch_size=batch_size,random_state=random_state)        
+        self.usc.save_model_nn('./test/neuro-onc-test4.zip')
+
+    
     def prediction_accuracy(self,labeled_scans,classified_types):
         scans=labeled_scans
         n=0
@@ -602,12 +724,127 @@ class UniversalScanClassifierTest:
         classified_types=self.usc.infer_nn(scans)
         self.prediction_accuracy(scans,classified_types)
 
+    def test_validate_model3_nn(self):
+        self.scm.load_from_file('./test/neuro_onc-dcm.json')
+        self.usc.load_model_nn('./test/neuro-onc-test3.zip')
+        scans=self.usc.read_scans_csv('./test/all_scans_voxelres_hofid.csv')
+        classified_types=self.usc.infer_nn(scans)
+        self.prediction_accuracy(scans,classified_types)
+        
+    def test_validate_model3_ext_nn(self):
+        self.scm.load_from_file('./test/neuro_onc-dcm.json')
+        self.usc.load_model_nn('./test/neuro-onc-test3.zip')
+        scans=self.usc.read_scans_csv('./test/all_scans_voxelres_hofid.csv')
+        uris=[ s['URI'] for s in scans ]
+        labels1,probs1,labels2,probs2,pred_gini_impurity,pred_margin_confidence,series_descriptions=self.usc.infer_nn_ext(scans)    
+        d={'URIs':uris,'labels1':labels1,'probs1':probs1,'labels2':labels2,'probs2':probs2,'series_descriptions':series_descriptions, 'pred_gini_impurity':pred_gini_impurity,'pred_margin_confidence':pred_margin_confidence}    
+        with open('./test/all_scans_voxelres_classification_output.csv',mode='w',newline='') as f:
+            w=csv.DictWriter(f,fieldnames=d.keys())
+            w.writeheader()
+            for row in zip(*d.values()): w.writerow(dict(zip(d.keys(),row)))
+      
+        classified_types=self.usc.infer_nn(scans)
+        self.prediction_accuracy(scans,labels1)
+
+    
     def test_infer_model2_svm(self):
         self.usc.load_model('./test/mri_types-test_svm.pkl')
         scans=self.usc.read_scans_csv('./test/all_scans.csv')
         classified_scans=self.usc.predict_classifier(scans)
         self.usc.write_scans_csv(classified_scans,'./test/all_scans-mri_types_predicted_svm.csv')
         
-            
-       
+def parse_args():
+    parser = argparse.ArgumentParser(description='Classify a list of DICOM files using a pre-trained perceptron model.')
+    #parser.add_argument('dicom_files', type=str, nargs='+', help='List of paths to DICOM files to be classified.')
+    parser.add_argument('--file_list', type=str, help='file with input DICOM file list', required=True)
+    parser.add_argument('--model_file', type=str, help='trained model file (zip)',required=True)
+    parser.add_argument('--nomenclature_file', type=str, help='nomenclature file',required=True)
+    parser.add_argument('--path_type', type=str, help='XNAT path type (scan,experiment,project)',required=True)
+    parser.add_argument('--tag_out', type=str, action='append', help='optional DICOM tag (string name, can be repeated) to output in csv',required=False)
     
+    return parser.parse_args()
+
+def parse_paths(paths, path_type):
+    '''
+    extract scan and experiment ID's from file paths, to put in the output csv.
+    '''
+    experiments,scans=[],[]
+    for path in paths:
+        experiment_id = 'NA'
+        scan_id = 'NA'
+        
+        if path_type == 'project':
+            match = re.match(r'.*/([^/]+)/([^/]+)/SCANS/([^/]+)/DICOM/([^/]+)', path)
+            if match:
+                experiment_id = match.group(2)
+                scan_id = match.group(3)
+        elif path_type == 'experiment':
+            match = re.match(r'.*/SCANS/([^/]+)/DICOM/([^/]+)', path)
+            if match:
+                scan_id = match.group(1)
+                
+        experiments+=[experiment_id]
+        scans+=[scan_id]
+        
+    return experiments,scans
+
+            
+def main():
+    args = parse_args()
+    #dicom_files = args.dicom_files
+    dicom_files=[]
+    file_list=args.file_list
+    model_file = args.model_file
+    nomenclature_file=args.nomenclature_file
+    tags_out=args.tag_out
+    if tags_out is None: tags_out=[]
+    path_type=args.path_type
+    
+    # Verify that the specified DICOM files exist
+    if not os.path.exists(file_list):    
+        print("Error: input file list {} does not exist".format(file_list))
+        sys.exit(1)
+    
+    with open(file_list, 'r') as file:
+        for line in file:
+            dicom_files.append(line.strip())
+
+    for file in dicom_files:
+        if not os.path.exists(file):
+            print(f"Error: Specified DICOM file does not exist: {file}", file=sys.stderr)
+            sys.exit(1)
+            
+    print('classifying {} files.'.format(len(dicom_files)))
+    scm=ScanClassificationModel()
+    usc=UniversalScanClassifier(scm)
+    if not scm.load_from_file(nomenclature_file): 
+        printf(f"Error: cannot read nomenclature file {file}", file=nomenclature_file)
+        sys.exit(1)
+    if not usc.load_model_nn(model_file):
+        printf(f"Error: cannot read model file {file}",file=model_file)
+        sys.exit(1)
+        
+    scans=usc.scans_from_files(dicom_files)
+    print("number of input scans:",len(scans))
+    labels1,probs1,labels2,probs2,pred_gini_impurity,pred_margin_confidence,series_descriptions=usc.infer_nn_ext(scans)
+    print("lengths of output arrays:",len(labels1),len(probs1),len(labels2),len(probs2),len(pred_gini_impurity),len(pred_margin_confidence),len(series_descriptions))   
+    d={'files':dicom_files,'labels1':labels1,'probs1':probs1,'labels2':labels2,'probs2':probs2,'series_descriptions':series_descriptions, 'pred_gini_impurity':pred_gini_impurity,'pred_margin_confidence':pred_margin_confidence}
+
+    if len(scans) != len(labels1): 
+        print("ERROR: number of input files doesn't match the number of labels, output invalid!")
+        return 1	
+        
+    #add experiment and scan columns.    
+    d['experiment'],d['scan']=parse_paths(dicom_files,path_type)
+    
+    for tag in tags_out:
+        d[tag]=[ s[tag] if tag in s.keys() else 'NA' for s in scans ]    
+    
+    with open('classification_output.csv',mode='w',newline='') as f:
+        w=csv.DictWriter(f,fieldnames=d.keys())
+        w.writeheader()
+        for row in zip(*d.values()): w.writerow(dict(zip(d.keys(),row)))
+        
+    
+if __name__ == '__main__':
+    main()

@@ -1,1 +1,22 @@
-{"scan_types": ["CBF", "CBV", "DSC", "DWI", "FA", "MD", "MPRAGE", "MTT", "OT", "PBP", "SWI", "T1hi", "T1lo", "T2FLAIR", "T2hi", "T2lo", "TRACEW", "TTP"], "selected_dcm_tags": [], "selected_fields_xnat": ["frames", "series_description"], "nomenclature_name": "NeuroOncologyMRI"}
+{"scan_types": ["CBF", "CBV", "DSC", "DWI", "FA", "MD", "MPRAGE", "MTT", "OT", "PBP", "SWI", "T1hi", "T1lo", "T2FLAIR", "T2hi", "T2lo", "TRACEW", "TTP"], "selected_dcm_tags": [], "selected_fields_xnat": ["frames", "series_description"], "nomenclature_name": "NeuroOncologyMRI",
+
+"scan_type_descriptions":[
+"cerebral blood flow (CBF, rCBF) MRI",
+"cerebral blood volume (CBV, rCBV) MRI ",
+"dynamic susceptibility contrast, perfusion weighted imaging (DSC, PWI) MRI",
+"diffusion tensor imaging (DTI, DTI-MRI, Diffusion MRI)",
+"fractional anisotropy (FA), diffusion anisotropy MRI",
+"mean diffusivity (MD), apparent diffusion coefficient (ADC) MRI",
+"Magnetization Prepared Rapid Gradient Echo (MPRAGE, MP-RAGE) MRI",
+"mean transit time (MTT) MRI",
+"unknown, undefined, not available",
+"percentage of baseline at peak (PBP) MRI",
+"susceptibility weighted imaging (SWI), Phase-enhanced imaging MRI",
+"High resolution T1 weighted MRI",
+"Low resolution T1 weighted MRI",
+"Fluid Attenuation Inversion Recovery (FLAIR), fluid-suppressed inversion recovery MRI",
+"High resolution T2 weighted MRI",
+"Low resolution T2 weighted MRI",
+"trace weighted imaging (TRACEW) MRI",
+"time to peak (TTP), Peak Enhancement Time, Time to Maximum, Tmax MRI"]
+}
